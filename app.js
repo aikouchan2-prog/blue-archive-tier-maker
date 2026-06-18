@@ -2,6 +2,10 @@ const STORAGE_KEY = "ba-tier-maker:v1";
 const EXPORT_VERSION = 1;
 const WIKI_BASE_URL = "https://bluearchive.wiki";
 const WIKI_API_BASE_URL = "https://bluearchive.wiki/w/api.php?action=parse&prop=text&format=json&origin=*";
+const WIKIRU_BASE_URL = "https://bluearchive.wikiru.jp/";
+const JAPANESE_WIKI_TARGET_CACHE_KEY = "ba-tier-maker:jp-wiki-targets:v5";
+const WIKI_WIKITEXT_BATCH_SIZE = 35;
+const JAPANESE_WIKI_NOT_FOUND_MESSAGE = "このキャラの日本語Wikiページは見つかりません";
 const CHARACTER_SOURCES = [
   { page: "Characters_image_list", label: "キャラ" },
   { page: "NPC", label: "NPC" },
@@ -359,6 +363,69 @@ const DEFAULT_TIERS = [
   { id: "tier-unclassified", label: "未分類", color: "#98a4a8", itemIds: [] },
 ];
 
+const WIKIRU_VARIANT_LABELS = new Map([
+  ["armed", "臨戦"],
+  ["arkuniform", "臨戦"],
+  ["band", "バンド"],
+  ["battle", "臨戦"],
+  ["bunnygirl", "バニーガール"],
+  ["camp", "キャンプ"],
+  ["camping", "キャンプ"],
+  ["casual", "私服"],
+  ["cheerleader", "応援団"],
+  ["christmas", "クリスマス"],
+  ["dress", "ドレス"],
+  ["frankenstein", "フランケンシュタイン"],
+  ["guide", "ガイド"],
+  ["gym", "体操服"],
+  ["hotspring", "温泉"],
+  ["idol", "アイドル"],
+  ["killer", "キラー"],
+  ["kimono", "着物"],
+  ["maid", "メイド"],
+  ["mummy", "ミイラ"],
+  ["newyear", "正月"],
+  ["nightwear", "パジャマ"],
+  ["nurse", "ナース"],
+  ["pajama", "パジャマ"],
+  ["pajamas", "パジャマ"],
+  ["parttimer", "アルバイト"],
+  ["qipao", "チーパオ"],
+  ["riding", "ライディング"],
+  ["schoolgirl", "制服"],
+  ["schooluniform", "制服"],
+  ["sportswear", "体操服"],
+  ["swimsuit", "水着"],
+  ["terror", "＊テラー"],
+  ["unmasked", "素顔"],
+  ["unmask", "素顔"],
+  ["werewolf", "ワーウルフ"],
+  ["winter", "冬服"],
+  ["young", "幼女"],
+]);
+
+const WIKIRU_PAGE_ALIASES = new Map([
+  ["ein", "アイン"],
+  ["gscpresident", "連邦生徒会長"],
+  ["haine", "ハイネ"],
+  ["hatsunemiku", "初音ミク"],
+  ["kokuriko", "コクリコ"],
+  ["kuzunoha", "クズノハ"],
+  ["malkuth", "マルクト"],
+  ["misakamikoto", "御坂美琴"],
+  ["ohr", "オウル"],
+  ["satenruiko", "佐天涙子"],
+  ["shokuhoumisaki", "食蜂操祈"],
+  ["hoshinoarmed", "ホシノ（臨戦）"],
+  ["hoshinobattle", "ホシノ（臨戦）"],
+  ["shunyoung", "シュン（幼女）"],
+  ["sof", "ソフ"],
+  ["studentcouncilpresident", "連邦生徒会長"],
+  ["sumomo", "スモモ"],
+  ["tokibattle", "トキ（臨戦）"],
+  ["tokischooluniform", "トキ（臨戦）"],
+]);
+
 const tierRows = document.querySelector("#tierRows");
 const tierRowTemplate = document.querySelector("#tierRowTemplate");
 const characterTemplate = document.querySelector("#characterTemplate");
@@ -387,11 +454,22 @@ const newCharacterImageUrl = document.querySelector("#newCharacterImageUrl");
 const newCharacterSourceUrl = document.querySelector("#newCharacterSourceUrl");
 const cancelCharacterButton = document.querySelector("#cancelCharacterButton");
 const tierColorMenu = document.querySelector("#tierColorMenu");
+const wikiContextMenu = document.createElement("div");
+
+wikiContextMenu.id = "wikiContextMenu";
+wikiContextMenu.className = "wiki-context-menu";
+wikiContextMenu.hidden = true;
+wikiContextMenu.setAttribute("role", "menu");
+document.body.appendChild(wikiContextMenu);
 
 let state = createEmptyState();
 let sortables = [];
 let activeTierColorId = null;
 let selectedTargetTierId = null;
+const japaneseWikiTargetCache = loadJapaneseWikiTargetCache();
+const wikiruPageExistenceCache = new Map();
+let japaneseWikiPreloadRunId = 0;
+let japaneseWikiTargetCacheSaveTimer = 0;
 
 init();
 
@@ -402,6 +480,7 @@ async function init() {
   if (savedState) {
     state = savedState;
     setStatus("保存済みデータを復元しました");
+    startJapaneseWikiTargetPreload(state.characters);
   }
 
   render();
@@ -425,9 +504,12 @@ function bindControls() {
   exportPngButton.addEventListener("click", exportPng);
   resetButton.addEventListener("click", resetLayout);
   tierColorMenu.addEventListener("click", handleTierColorMenuClick);
+  wikiContextMenu.addEventListener("click", handleWikiContextMenuClick);
   document.addEventListener("click", handleDocumentClick);
-  window.addEventListener("resize", closeTierColorMenu);
-  window.addEventListener("scroll", closeTierColorMenu, true);
+  document.addEventListener("contextmenu", handleDocumentContextMenu);
+  document.addEventListener("keydown", handleDocumentKeydown);
+  window.addEventListener("resize", closeFloatingMenus);
+  window.addEventListener("scroll", closeFloatingMenus, true);
 }
 
 function openAddTierDialog() {
@@ -521,6 +603,7 @@ function addCharacterFromForm(event) {
   sortUnclassifiedTier();
   saveState();
   render();
+  startJapaneseWikiTargetPreload([character]);
   closeDialog(addCharacterDialog);
   setStatus(`キャラ「${title}」を未分類に追加しました`);
 }
@@ -532,6 +615,7 @@ async function refreshCharacters({ keepExistingLayout = true, force = false } = 
     mergeCharacters(characters, keepExistingLayout);
     saveState();
     render();
+    startJapaneseWikiTargetPreload(state.characters);
     setStatus(`${characters.length}件のキャラ/NPCを取得しました`);
   } catch (error) {
     console.error(error);
@@ -986,6 +1070,7 @@ function createCharacterGroup(group) {
   groupElement.append(header, cards);
   groupElement.addEventListener("dblclick", handleMovableDoubleClick);
   groupElement.addEventListener("keydown", handleMovableKeydown);
+  groupElement.addEventListener("contextmenu", handleCharacterContextMenu);
 
   return groupElement;
 }
@@ -1009,8 +1094,750 @@ function createCharacterCard(character, { interactive = true } = {}) {
     card.addEventListener("dblclick", handleMovableDoubleClick);
     card.addEventListener("keydown", handleMovableKeydown);
   }
+  card.addEventListener("contextmenu", handleCharacterContextMenu);
 
   return card;
+}
+
+function handleCharacterContextMenu(event) {
+  const characters = getContextMenuCharacters(event.currentTarget);
+  if (!characters.length) {
+    return;
+  }
+
+  event.preventDefault();
+  event.stopPropagation();
+  closeTierColorMenu();
+  openWikiContextMenu(characters, event.clientX, event.clientY);
+}
+
+function getContextMenuCharacters(element) {
+  const charactersById = new Map(state.characters.map((character) => [character.id, character]));
+  const groupElement = element.classList.contains("character-group")
+    ? element
+    : element.closest(".character-group");
+
+  if (groupElement) {
+    return getMovableItemIds(groupElement).map((id) => charactersById.get(id)).filter(Boolean);
+  }
+
+  const character = charactersById.get(element.dataset.id);
+  return character ? [character] : [];
+}
+
+function openWikiContextMenu(characters, clientX, clientY) {
+  const menuCharacters = characters.filter((character) => !getCachedJapaneseWikiTarget(character)?.hidden);
+  if (!menuCharacters.length) {
+    closeWikiContextMenu();
+    setStatus(JAPANESE_WIKI_NOT_FOUND_MESSAGE);
+    return;
+  }
+
+  wikiContextMenu.textContent = "";
+  wikiContextMenu.appendChild(createWikiContextMenuHeader(menuCharacters));
+
+  menuCharacters.forEach((character) => {
+    const item = createWikiContextMenuItem(character, menuCharacters.length > 1);
+    wikiContextMenu.appendChild(item);
+    resolveWikiContextMenuItem(item, character);
+  });
+
+  positionWikiContextMenu(clientX, clientY);
+}
+
+function createWikiContextMenuHeader(characters) {
+  const header = document.createElement("div");
+  header.className = "wiki-context-menu-header";
+  header.textContent = characters.length > 1 ? "日本語Wikiで開く" : characters[0].title;
+  return header;
+}
+
+function createWikiContextMenuItem(character, showCharacterName) {
+  const button = document.createElement("button");
+  const label = document.createElement("span");
+  const meta = document.createElement("span");
+
+  button.type = "button";
+  button.className = "wiki-context-menu-item";
+  button.dataset.characterId = character.id;
+  button.dataset.characterTitle = character.title;
+  button.setAttribute("role", "menuitem");
+  button.disabled = false;
+
+  label.className = "wiki-context-menu-item-title";
+  label.textContent = showCharacterName ? character.title : "日本語Wikiで開く";
+  meta.className = "wiki-context-menu-item-meta";
+
+  button.append(label, meta);
+  applyWikiContextMenuTarget(button, createPendingJapaneseWikiTarget(character), { pending: true });
+  return button;
+}
+
+async function resolveWikiContextMenuItem(button, character) {
+  const cachedTarget = getCachedJapaneseWikiTarget(character);
+  if (cachedTarget) {
+    if (cachedTarget.hidden) {
+      removeWikiContextMenuItem(button);
+      return;
+    }
+
+    applyWikiContextMenuTarget(button, cachedTarget);
+    return;
+  }
+
+  applyWikiContextMenuTarget(button, createPendingJapaneseWikiTarget(character), { pending: true });
+
+  try {
+    const target = await getJapaneseWikiTarget(character);
+    if (!button.isConnected) {
+      return;
+    }
+
+    if (target.hidden) {
+      removeWikiContextMenuItem(button);
+      return;
+    }
+
+    applyWikiContextMenuTarget(button, target);
+  } catch (error) {
+    console.error(error);
+    if (!button.isConnected) {
+      return;
+    }
+
+    const fallbackTarget = createJapaneseWikiFallbackTarget(character);
+    if (fallbackTarget.hidden) {
+      removeWikiContextMenuItem(button);
+      return;
+    }
+
+    applyWikiContextMenuTarget(button, fallbackTarget);
+  }
+}
+
+function applyWikiContextMenuTarget(button, target, { pending = false } = {}) {
+  const meta = button.querySelector(".wiki-context-menu-item-meta");
+  button.dataset.url = target.url || "";
+  button.dataset.isFallback = String(target.isFallback);
+  button.dataset.fallbackLabel = target.fallbackLabel || "";
+  button.disabled = Boolean(pending && !target.url);
+
+  if (meta) {
+    meta.textContent = pending
+      ? target.url ? "検索で開く（直リンク確認中）" : "Wikiページ確認中..."
+      : target.isFallback
+        ? `${target.fallbackLabel || "検索"}で開く`
+        : "ブルアカ攻略有志Wiki";
+  }
+}
+
+function removeWikiContextMenuItem(button) {
+  button.remove();
+
+  if (!wikiContextMenu.hidden && !wikiContextMenu.querySelector(".wiki-context-menu-item")) {
+    closeWikiContextMenu();
+    setStatus(JAPANESE_WIKI_NOT_FOUND_MESSAGE);
+  }
+}
+
+function createPendingJapaneseWikiTarget(character) {
+  if (isVariantCharacter(character)) {
+    return {
+      url: "",
+      isFallback: false,
+      fallbackLabel: "",
+    };
+  }
+
+  return createJapaneseWikiFallbackTarget(character);
+}
+
+function createJapaneseWikiFallbackTarget(character, wikiInfo = {}) {
+  if (isVariantCharacter(character)) {
+    return createHiddenJapaneseWikiTarget();
+  }
+
+  const sourceUrl = parseUrl(character.sourceUrl);
+  if (sourceUrl?.hostname === "bluearchive.wiki" && sourceUrl.pathname.startsWith("/wiki/")) {
+    return createHiddenJapaneseWikiTarget();
+  }
+
+  return {
+    kind: "searchFallback",
+    url: buildJapaneseWikiSearchUrl(character, wikiInfo),
+    isFallback: true,
+    fallbackLabel: "検索",
+  };
+}
+
+function createHiddenJapaneseWikiTarget() {
+  return {
+    kind: "hidden",
+    url: "",
+    isFallback: false,
+    fallbackLabel: "",
+    hidden: true,
+  };
+}
+
+function positionWikiContextMenu(clientX, clientY) {
+  wikiContextMenu.style.left = "0px";
+  wikiContextMenu.style.top = "0px";
+  wikiContextMenu.hidden = false;
+
+  const rect = wikiContextMenu.getBoundingClientRect();
+  const maxLeft = Math.max(8, window.innerWidth - rect.width - 8);
+  const maxTop = Math.max(8, window.innerHeight - rect.height - 8);
+  const left = Math.min(maxLeft, Math.max(8, clientX));
+  const top = Math.min(maxTop, Math.max(8, clientY));
+
+  wikiContextMenu.style.left = `${left}px`;
+  wikiContextMenu.style.top = `${top}px`;
+}
+
+function closeWikiContextMenu() {
+  wikiContextMenu.hidden = true;
+  wikiContextMenu.textContent = "";
+}
+
+function handleWikiContextMenuClick(event) {
+  const button = event.target.closest(".wiki-context-menu-item");
+  if (!button || !wikiContextMenu.contains(button) || button.disabled || !button.dataset.url) {
+    return;
+  }
+
+  event.preventDefault();
+  event.stopPropagation();
+
+  const title = button.dataset.characterTitle || "選択したキャラ";
+  const fallbackLabel = button.dataset.fallbackLabel || "";
+  const action = button.dataset.isFallback === "true"
+    ? `${fallbackLabel || "検索"}を開きました`
+    : "日本語Wikiを開きました";
+  const opened = openExternalUrl(button.dataset.url);
+  closeWikiContextMenu();
+  setStatus(opened ? `「${title}」の${action}` : `ポップアップがブロックされました: ${button.dataset.url}`);
+}
+
+function openExternalUrl(url) {
+  const openedWindow = window.open(url, "_blank");
+  if (!openedWindow) {
+    return false;
+  }
+
+  openedWindow.opener = null;
+  return true;
+}
+
+async function getJapaneseWikiTarget(character) {
+  const cachedTarget = getCachedJapaneseWikiTarget(character);
+  if (cachedTarget) {
+    return cachedTarget;
+  }
+
+  const cacheKey = getJapaneseWikiCacheKey(character);
+  const inFlightTarget = japaneseWikiTargetCache.get(cacheKey);
+  if (inFlightTarget && typeof inFlightTarget.then === "function") {
+    return inFlightTarget;
+  }
+
+  const targetPromise = resolveJapaneseWikiTarget(character);
+  japaneseWikiTargetCache.set(cacheKey, targetPromise);
+
+  try {
+    const target = await targetPromise;
+    cacheJapaneseWikiTarget(character, target);
+    return target;
+  } catch (error) {
+    japaneseWikiTargetCache.delete(cacheKey);
+    throw error;
+  }
+}
+
+function startJapaneseWikiTargetPreload(characters) {
+  const targets = Array.isArray(characters) ? characters.filter(Boolean) : [];
+  if (!targets.length) {
+    return;
+  }
+
+  const runId = ++japaneseWikiPreloadRunId;
+  preloadJapaneseWikiTargets(targets, runId).catch((error) => {
+    if (runId === japaneseWikiPreloadRunId) {
+      console.warn("Japanese Wiki link preload failed:", error);
+    }
+  });
+}
+
+async function preloadJapaneseWikiTargets(characters, runId) {
+  const preloadEntries = [];
+  const pageNamesByKey = new Map();
+
+  characters.forEach((character) => {
+    if (getCachedJapaneseWikiTarget(character)) {
+      return;
+    }
+
+    const directSourceUrl = getDirectWikiruSourceUrl(character.sourceUrl);
+    if (directSourceUrl) {
+      cacheJapaneseWikiTarget(character, { url: directSourceUrl, isFallback: false });
+      return;
+    }
+
+    const wikiPageName = getBlueArchiveWikiPageName(character);
+    if (!wikiPageName) {
+      cacheJapaneseWikiTarget(character, createJapaneseWikiFallbackTarget(character));
+      return;
+    }
+
+    const basePageName = getBaseWikiPageName(wikiPageName);
+    const pageKey = normalizeWikiPageKey(wikiPageName);
+    const basePageKey = normalizeWikiPageKey(basePageName);
+    pageNamesByKey.set(pageKey, wikiPageName);
+    pageNamesByKey.set(basePageKey, basePageName);
+    preloadEntries.push({ character, pageKey, basePageKey });
+  });
+
+  const pageNames = Array.from(pageNamesByKey.values());
+  const infoByPageKey = new Map();
+  for (const chunk of chunkArray(pageNames, WIKI_WIKITEXT_BATCH_SIZE)) {
+    if (runId !== japaneseWikiPreloadRunId) {
+      return;
+    }
+
+    const chunkInfo = await fetchBlueArchiveWikiJapaneseInfoBatch(chunk);
+    chunkInfo.forEach((wikiInfo, pageKey) => {
+      infoByPageKey.set(pageKey, wikiInfo);
+    });
+  }
+
+  for (const chunk of chunkArray(preloadEntries, 12)) {
+    if (runId !== japaneseWikiPreloadRunId) {
+      return;
+    }
+
+    await Promise.all(chunk.map(async ({ character, pageKey, basePageKey }) => {
+      try {
+        const target = await buildJapaneseWikiTargetFromInfo(
+          character,
+          infoByPageKey.get(pageKey) || {},
+          infoByPageKey.get(basePageKey) || {},
+        );
+        cacheJapaneseWikiTarget(character, target);
+      } catch (error) {
+        console.warn(`Japanese Wiki preload failed for ${character.title}:`, error);
+        cacheJapaneseWikiTarget(character, createJapaneseWikiFallbackTarget(character));
+      }
+    }));
+  }
+}
+
+function getJapaneseWikiCacheKey(character) {
+  return `${character.id}:${character.title}:${character.sourceUrl || ""}`;
+}
+
+function getCachedJapaneseWikiTarget(character) {
+  const target = japaneseWikiTargetCache.get(getJapaneseWikiCacheKey(character));
+  if (!target || typeof target.then === "function") {
+    return null;
+  }
+
+  return target;
+}
+
+function cacheJapaneseWikiTarget(character, target) {
+  const normalizedTarget = normalizeJapaneseWikiTarget(target);
+  if (!normalizedTarget) {
+    return;
+  }
+
+  japaneseWikiTargetCache.set(getJapaneseWikiCacheKey(character), normalizedTarget);
+  scheduleJapaneseWikiTargetCacheSave();
+}
+
+function normalizeJapaneseWikiTarget(target) {
+  if (!target || (!target.url && !target.hidden)) {
+    return null;
+  }
+
+  return {
+    kind: String(target.kind || (target.hidden ? "hidden" : target.isFallback ? "fallback" : "wikiru")),
+    url: String(target.url),
+    isFallback: Boolean(target.isFallback),
+    pageName: String(target.pageName || ""),
+    fallbackLabel: String(target.fallbackLabel || ""),
+    hidden: Boolean(target.hidden),
+  };
+}
+
+function loadJapaneseWikiTargetCache() {
+  try {
+    const payload = JSON.parse(localStorage.getItem(JAPANESE_WIKI_TARGET_CACHE_KEY) || "null");
+    if (!payload || payload.version !== 6 || !Array.isArray(payload.entries)) {
+      return new Map();
+    }
+
+    return new Map(
+      payload.entries
+        .map(([key, target]) => [String(key), normalizeJapaneseWikiTarget(target)])
+        .filter(([, target]) => target),
+    );
+  } catch (error) {
+    console.warn("Japanese Wiki link cache could not be loaded:", error);
+    return new Map();
+  }
+}
+
+function scheduleJapaneseWikiTargetCacheSave() {
+  window.clearTimeout(japaneseWikiTargetCacheSaveTimer);
+  japaneseWikiTargetCacheSaveTimer = window.setTimeout(saveJapaneseWikiTargetCache, 400);
+}
+
+function saveJapaneseWikiTargetCache() {
+  const entries = Array.from(japaneseWikiTargetCache.entries())
+    .filter(([, target]) => target && typeof target.then !== "function")
+    .map(([key, target]) => [key, normalizeJapaneseWikiTarget(target)])
+    .filter(([, target]) => target);
+
+  try {
+    localStorage.setItem(JAPANESE_WIKI_TARGET_CACHE_KEY, JSON.stringify({
+      version: 6,
+      savedAt: new Date().toISOString(),
+      entries,
+    }));
+  } catch (error) {
+    console.warn("Japanese Wiki link cache could not be saved:", error);
+  }
+}
+
+async function buildJapaneseWikiTargetFromInfo(character, wikiInfo = {}, baseWikiInfo = {}) {
+  const candidates = buildWikiruPageCandidates(wikiInfo, baseWikiInfo, character);
+  const pageName = candidates[0];
+  if (pageName) {
+    return {
+      kind: "wikiru",
+      url: buildWikiruPageUrl(pageName),
+      isFallback: false,
+      pageName,
+    };
+  }
+
+  if (isVariantCharacter(character)) {
+    return createHiddenJapaneseWikiTarget();
+  }
+
+  return createJapaneseWikiFallbackTarget(character, wikiInfo);
+}
+
+function buildWikiruPageCandidates(wikiInfo, baseWikiInfo, character) {
+  const candidates = [];
+  const titleAlias = getWikiruPageAlias(character.title);
+  addUniqueCandidate(candidates, titleAlias);
+
+  const wikiPageName = buildWikiruPageName(wikiInfo, character);
+  addUniqueCandidate(candidates, wikiPageName);
+
+  if (isVariantCharacter(character)) {
+    return candidates;
+  }
+
+  const baseTitle = getBaseWikiPageName(character.title);
+  const basePageName = cleanJapaneseWikiValue(baseWikiInfo.personalNameJp) || getWikiruPageAlias(baseTitle);
+  addUniqueCandidate(candidates, basePageName);
+
+  return candidates;
+}
+
+function addUniqueCandidate(candidates, pageName) {
+  const cleanedPageName = cleanJapaneseWikiValue(pageName);
+  if (cleanedPageName && !candidates.includes(cleanedPageName)) {
+    candidates.push(cleanedPageName);
+  }
+}
+
+async function resolveJapaneseWikiTarget(character) {
+  const directSourceUrl = getDirectWikiruSourceUrl(character.sourceUrl);
+  if (directSourceUrl) {
+    return { url: directSourceUrl, isFallback: false };
+  }
+
+  const wikiPageName = getBlueArchiveWikiPageName(character);
+  if (wikiPageName) {
+    try {
+      const basePageName = getBaseWikiPageName(wikiPageName);
+      const infoByPageKey = await fetchBlueArchiveWikiJapaneseInfoBatch([wikiPageName, basePageName]);
+      return await buildJapaneseWikiTargetFromInfo(
+        character,
+        infoByPageKey.get(normalizeWikiPageKey(wikiPageName)) || {},
+        infoByPageKey.get(normalizeWikiPageKey(basePageName)) || {},
+      );
+    } catch (error) {
+      console.warn(`Japanese page resolution failed for ${character.title}:`, error);
+    }
+  }
+
+  return createJapaneseWikiFallbackTarget(character);
+}
+
+function getDirectWikiruSourceUrl(sourceUrl) {
+  const url = parseUrl(sourceUrl);
+  if (!url || url.hostname !== "bluearchive.wikiru.jp") {
+    return "";
+  }
+
+  return url.toString();
+}
+
+function getBlueArchiveWikiPageName(character) {
+  const sourceUrl = parseUrl(character.sourceUrl);
+  if (sourceUrl?.hostname === "bluearchive.wiki" && sourceUrl.pathname.startsWith("/wiki/")) {
+    return decodeURIComponent(sourceUrl.pathname.replace(/^\/wiki\//, "")).replace(/_/g, " ");
+  }
+
+  return cleanTitle(character.title);
+}
+
+function getBaseWikiPageName(pageName) {
+  return cleanTitle(pageName)
+    .replace(/\s*\([^)]*\)\s*$/u, "")
+    .replace(/\s+(Terror|Armed|Young)$/iu, "");
+}
+
+function isVariantCharacter(character) {
+  const title = typeof character === "string" ? character : character?.title;
+  return Boolean(getTitleVariantLabel(title));
+}
+
+function getWikiruPageAlias(title) {
+  return WIKIRU_PAGE_ALIASES.get(normalizeTierMakerTitleKey(title)) || "";
+}
+
+async function fetchBlueArchiveWikiJapaneseInfo(pageName) {
+  const infoByPageKey = await fetchBlueArchiveWikiJapaneseInfoBatch([pageName]);
+  const wikiInfo = infoByPageKey.get(normalizeWikiPageKey(pageName));
+  if (!wikiInfo) {
+    throw new Error(`Wiki API response did not include wikitext for ${pageName}`);
+  }
+
+  return wikiInfo;
+}
+
+async function fetchBlueArchiveWikiJapaneseInfoBatch(pageNames) {
+  const uniquePageNames = [...new Set(pageNames.map(cleanTitle).filter(Boolean))];
+  const infoByPageKey = new Map();
+  if (!uniquePageNames.length) {
+    return infoByPageKey;
+  }
+
+  const response = await fetch(buildWikiWikitextBatchApiUrl(uniquePageNames), { cache: "force-cache" });
+  if (!response.ok) {
+    throw new Error(`Wiki API error: ${response.status}`);
+  }
+
+  const payload = await response.json();
+  if (payload?.error) {
+    throw new Error(payload.error.info || "Wiki API error");
+  }
+
+  const normalizedKeysByCanonicalKey = new Map();
+  (payload?.query?.normalized || []).forEach((entry) => {
+    const canonicalKey = normalizeWikiPageKey(entry.to);
+    if (!normalizedKeysByCanonicalKey.has(canonicalKey)) {
+      normalizedKeysByCanonicalKey.set(canonicalKey, new Set());
+    }
+    normalizedKeysByCanonicalKey.get(canonicalKey).add(normalizeWikiPageKey(entry.from));
+  });
+
+  Object.values(payload?.query?.pages || {}).forEach((page) => {
+    const wikitext = getWikiPageWikitext(page);
+    if (!wikitext) {
+      return;
+    }
+
+    const pageKey = normalizeWikiPageKey(page.title);
+    const wikiInfo = {
+      personalNameJp: getWikitextTemplateValue(wikitext, "PersonalNameJp"),
+      variant: getWikitextTemplateValue(wikitext, "Variant"),
+    };
+    infoByPageKey.set(pageKey, wikiInfo);
+
+    (normalizedKeysByCanonicalKey.get(pageKey) || []).forEach((normalizedKey) => {
+      infoByPageKey.set(normalizedKey, wikiInfo);
+    });
+  });
+
+  return infoByPageKey;
+}
+
+function getWikiPageWikitext(page) {
+  const revision = page?.revisions?.[0];
+  return revision?.slots?.main?.["*"] || revision?.slots?.main?.content || revision?.["*"] || "";
+}
+
+function buildWikiWikitextBatchApiUrl(pageNames) {
+  const url = new URL(`${WIKI_BASE_URL}/w/api.php`);
+  url.searchParams.set("action", "query");
+  url.searchParams.set("prop", "revisions");
+  url.searchParams.set("rvslots", "main");
+  url.searchParams.set("rvprop", "content");
+  url.searchParams.set("format", "json");
+  url.searchParams.set("origin", "*");
+  url.searchParams.set("titles", pageNames.join("|"));
+  return url.toString();
+}
+
+function buildWikiruPageName(wikiInfo, character) {
+  const personalName = cleanJapaneseWikiValue(wikiInfo.personalNameJp);
+  if (!personalName) {
+    return "";
+  }
+
+  const variant = cleanTitle(wikiInfo.variant || getTitleVariantLabel(character.title));
+  if (!variant) {
+    return personalName;
+  }
+
+  const japaneseVariant = getWikiruVariantLabel(variant);
+  if (!japaneseVariant) {
+    return "";
+  }
+
+  if (japaneseVariant.startsWith("＊")) {
+    return `${personalName}${japaneseVariant}`;
+  }
+
+  return `${personalName}（${japaneseVariant}）`;
+}
+
+function getWikiruVariantLabel(variant) {
+  const cleanedVariant = cleanJapaneseWikiValue(variant);
+  if (!cleanedVariant) {
+    return "";
+  }
+
+  if (containsJapaneseText(cleanedVariant)) {
+    return cleanedVariant.replace(/[()（）]/g, "");
+  }
+
+  return WIKIRU_VARIANT_LABELS.get(normalizeVariantKey(cleanedVariant)) || "";
+}
+
+function getTitleVariantLabel(title) {
+  const parenthetical = /\(([^)]+)\)\s*$/u.exec(String(title || ""));
+  if (parenthetical) {
+    return parenthetical[1];
+  }
+
+  const suffix = ["Terror", "Armed", "Young"].find((label) => new RegExp(`\\s${escapeRegExp(label)}$`, "i").test(title));
+  return suffix || "";
+}
+
+function buildWikiruPageUrl(pageName) {
+  return `${WIKIRU_BASE_URL}?${encodeURIComponent(pageName)}`;
+}
+
+function buildWikiruPageSourceUrl(pageName) {
+  const url = new URL(WIKIRU_BASE_URL);
+  url.searchParams.set("cmd", "source");
+  url.searchParams.set("page", pageName);
+  return url.toString();
+}
+
+async function checkWikiruPageExists(pageName) {
+  const cacheKey = cleanJapaneseWikiValue(pageName);
+  if (!cacheKey) {
+    return false;
+  }
+
+  if (wikiruPageExistenceCache.has(cacheKey)) {
+    return await wikiruPageExistenceCache.get(cacheKey);
+  }
+
+  const existencePromise = fetch(buildWikiruPageSourceUrl(cacheKey), { cache: "force-cache" })
+    .then(async (response) => {
+      if (!response.ok) {
+        return false;
+      }
+
+      const html = await response.text();
+      const pageTitle = cleanTitle(/<title>(.*?)<\/title>/is.exec(html)?.[1] || "");
+      return Boolean(pageTitle && !pageTitle.includes("見つかりません"));
+    });
+
+  wikiruPageExistenceCache.set(cacheKey, existencePromise);
+
+  try {
+    const exists = await existencePromise;
+    wikiruPageExistenceCache.set(cacheKey, exists);
+    return exists;
+  } catch (error) {
+    wikiruPageExistenceCache.delete(cacheKey);
+    throw error;
+  }
+}
+
+function buildJapaneseWikiSearchUrl(character, wikiInfo = {}) {
+  const queryText = [
+    "site:bluearchive.wikiru.jp",
+    cleanJapaneseWikiValue(wikiInfo.personalNameJp) || character.title,
+    cleanJapaneseWikiValue(wikiInfo.variant),
+    "ブルアカ",
+  ].filter(Boolean).join(" ");
+
+  return `https://www.google.com/search?q=${encodeURIComponent(queryText)}`;
+}
+
+function getWikitextTemplateValue(wikitext, fieldName) {
+  const match = new RegExp(
+    `^[^\\S\\r\\n]*\\|[^\\S\\r\\n]*${escapeRegExp(fieldName)}[^\\S\\r\\n]*=[^\\S\\r\\n]*(.*?)[^\\S\\r\\n]*$`,
+    "im",
+  ).exec(wikitext);
+  return cleanJapaneseWikiValue(match?.[1] || "");
+}
+
+function cleanJapaneseWikiValue(value) {
+  return cleanTitle(String(value || "")
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .replace(/<[^>]*>/g, "")
+    .replace(/\[\[|\]\]/g, ""));
+}
+
+function normalizeVariantKey(value) {
+  return String(value || "")
+    .normalize("NFKD")
+    .toLowerCase()
+    .replace(/&/g, "and")
+    .replace(/[^a-z0-9]/g, "");
+}
+
+function normalizeWikiPageKey(value) {
+  return cleanTitle(value)
+    .replace(/_/g, " ")
+    .replace(/\s+/g, " ")
+    .toLowerCase();
+}
+
+function chunkArray(items, size) {
+  const chunks = [];
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+  return chunks;
+}
+
+function containsJapaneseText(value) {
+  return /[ぁ-んァ-ヶ一-龠々]/u.test(String(value || ""));
+}
+
+function parseUrl(value) {
+  try {
+    return value ? new URL(value) : null;
+  } catch {
+    return null;
+  }
+}
+
+function escapeRegExp(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function handleTierRowClick(event, tierId) {
@@ -1272,6 +2099,11 @@ function closeTierColorMenu() {
   activeTierColorId = null;
 }
 
+function closeFloatingMenus() {
+  closeTierColorMenu();
+  closeWikiContextMenu();
+}
+
 function handleTierColorMenuClick(event) {
   const swatch = event.target.closest(".color-swatch");
   if (!swatch || !tierColorMenu.contains(swatch) || !activeTierColorId) {
@@ -1283,11 +2115,28 @@ function handleTierColorMenuClick(event) {
 }
 
 function handleDocumentClick(event) {
-  if (tierColorMenu.hidden || tierColorMenu.contains(event.target) || event.target.closest(".tier-color-button")) {
-    return;
+  const target = event.target instanceof Element ? event.target : null;
+
+  if (!tierColorMenu.hidden && !tierColorMenu.contains(event.target) && !target?.closest(".tier-color-button")) {
+    closeTierColorMenu();
   }
 
-  closeTierColorMenu();
+  if (!wikiContextMenu.hidden && !wikiContextMenu.contains(event.target)) {
+    closeWikiContextMenu();
+  }
+}
+
+function handleDocumentContextMenu(event) {
+  const target = event.target instanceof Element ? event.target : null;
+  if (!target?.closest(".character-card, .character-group, .wiki-context-menu")) {
+    closeWikiContextMenu();
+  }
+}
+
+function handleDocumentKeydown(event) {
+  if (event.key === "Escape") {
+    closeFloatingMenus();
+  }
 }
 
 function renderColorPalette(container, selectedColor) {
@@ -1357,6 +2206,7 @@ async function importJson(event) {
     normalizeTierAssignments();
     saveState();
     render();
+    startJapaneseWikiTargetPreload(state.characters);
     setStatus("JSONバックアップを読み込みました");
   } catch (error) {
     console.error(error);
@@ -1782,6 +2632,7 @@ function resetLayout() {
   getUnclassifiedTier().itemIds = characters.map((character) => character.id);
   saveState();
   render();
+  startJapaneseWikiTargetPreload(state.characters);
   setStatus("初期状態に戻しました");
 }
 
