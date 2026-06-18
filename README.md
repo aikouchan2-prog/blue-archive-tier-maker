@@ -11,9 +11,8 @@ Windowsでは `start_windows.bat` を実行します。
 1. GitHubで新しいリポジトリを作成します。
 2. この `ブルーアーカイブティア表` フォルダの中身をリポジトリのルートに置いて、`main` ブランチへpushします。
 3. GitHubの `Settings > Pages` を開きます。
-4. `Build and deployment` の `Source` を `Deploy from a branch` にします。
-5. `Branch` は `main`、フォルダは `/ (root)` を選びます。
-6. 保存後、数分待つと公開URLが発行されます。
+4. `Build and deployment` の `Source` を `GitHub Actions` にします。
+5. `Actions` タブで `Deploy to GitHub Pages` が成功すると公開URLが発行されます。
 
 公開後の保存データは各ユーザーのブラウザの `localStorage` に保存されます。別ユーザーと同じ配置を共有したい場合は、JSON保存/読込を使ってください。
 
