@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ブルーアーカイブ ティア表メーカー</title>
-    <link rel="stylesheet" href="styles.css?v=20260618-16" />
+    <link rel="stylesheet" href="styles.css?v=20260619-1" />
   </head>
   <body>
     <header class="app-header">
@@ -20,10 +20,22 @@
 
     <main class="app-shell">
       <section class="toolbar" aria-label="操作">
-        <label class="search-box">
-          <span>検索</span>
-          <input id="searchInput" type="search" autocomplete="off" placeholder="キャラ名で絞り込み" />
-        </label>
+        <div class="toolbar-fields">
+          <label class="search-box">
+            <span>検索</span>
+            <input id="searchInput" type="search" autocomplete="off" placeholder="キャラ名で絞り込み" />
+          </label>
+
+          <label class="sort-box">
+            <span>並び替え</span>
+            <select id="sortModeSelect">
+              <option value="title">名前順</option>
+              <option value="school">学園順</option>
+              <option value="age">年齢順</option>
+              <option value="height">身長順</option>
+            </select>
+          </label>
+        </div>
 
         <div class="button-group">
           <button id="addTierButton" type="button">＋ランク</button>
@@ -106,6 +118,6 @@
 
     <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.2/Sortable.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/html-to-image@1.11.11/dist/html-to-image.min.js"></script>
-    <script src="app.js?v=20260618-40"></script>
+    <script src="app.js?v=20260619-1"></script>
   </body>
 </html>

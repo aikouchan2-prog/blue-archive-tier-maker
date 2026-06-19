@@ -6,6 +6,28 @@ const WIKIRU_BASE_URL = "https://bluearchive.wikiru.jp/";
 const JAPANESE_WIKI_TARGET_CACHE_KEY = "ba-tier-maker:jp-wiki-targets:v5";
 const WIKI_WIKITEXT_BATCH_SIZE = 35;
 const JAPANESE_WIKI_NOT_FOUND_MESSAGE = "このキャラの日本語Wikiページは見つかりません";
+const SORT_MODE_LABELS = new Map([
+  ["title", "名前順"],
+  ["school", "学園順"],
+  ["age", "年齢順"],
+  ["height", "身長順"],
+]);
+const SCHOOL_SORT_ORDER = [
+  "abydos",
+  "gehenna",
+  "trinity",
+  "millennium",
+  "hyakkiyako",
+  "shanhaijing",
+  "redwinter",
+  "valkyrie",
+  "srt",
+  "arius",
+  "schale",
+  "tokiwadai",
+  "highlander",
+  "wildhunt",
+];
 const CHARACTER_SOURCES = [
   { page: "Characters_image_list", label: "キャラ" },
   { page: "NPC", label: "NPC" },
@@ -432,6 +454,7 @@ const characterTemplate = document.querySelector("#characterTemplate");
 const loadStatus = document.querySelector("#loadStatus");
 const characterCount = document.querySelector("#characterCount");
 const searchInput = document.querySelector("#searchInput");
+const sortModeSelect = document.querySelector("#sortModeSelect");
 const addTierButton = document.querySelector("#addTierButton");
 const addCharacterButton = document.querySelector("#addCharacterButton");
 const refreshButton = document.querySelector("#refreshButton");
@@ -490,6 +513,7 @@ async function init() {
 function bindControls() {
   renderColorPalette(newTierPalette, newTierColor.value);
   searchInput.addEventListener("input", applySearchFilter);
+  sortModeSelect.addEventListener("change", handleSortModeChange);
   addTierButton.addEventListener("click", openAddTierDialog);
   addCharacterButton.addEventListener("click", openAddCharacterDialog);
   addTierForm.addEventListener("submit", addTierFromForm);
@@ -655,7 +679,8 @@ async function fetchWikiCharacters() {
     console.warn("Some Wiki sources failed:", failures);
   }
 
-  return excludeCharacters(applyTierMakerImages(records));
+  const characters = excludeCharacters(applyTierMakerImages(records));
+  return hydrateCharacterSortMetadata(characters);
 }
 
 async function fetchCharacterSource(source) {
@@ -765,6 +790,80 @@ function applyTierMakerImages(records) {
     }));
 
   return sortCharactersByTitle([...updatedRecords, ...extras]);
+}
+
+async function hydrateCharacterSortMetadata(characters) {
+  const entries = [];
+  const pageNamesByKey = new Map();
+
+  characters.forEach((character) => {
+    const wikiPageName = getBlueArchiveWikiPageName(character);
+    if (!wikiPageName) {
+      return;
+    }
+
+    const basePageName = getBaseWikiPageName(wikiPageName);
+    const pageKey = normalizeWikiPageKey(wikiPageName);
+    const basePageKey = normalizeWikiPageKey(basePageName);
+    pageNamesByKey.set(pageKey, wikiPageName);
+    pageNamesByKey.set(basePageKey, basePageName);
+    entries.push({ id: character.id, pageKey, basePageKey });
+  });
+
+  if (!entries.length) {
+    return characters.map((character) => ({ ...character, sortMeta: createUnknownSortMetadata() }));
+  }
+
+  try {
+    const infoByPageKey = new Map();
+    for (const chunk of chunkArray(Array.from(pageNamesByKey.values()), WIKI_WIKITEXT_BATCH_SIZE)) {
+      const chunkInfo = await fetchBlueArchiveWikiJapaneseInfoBatch(chunk);
+      chunkInfo.forEach((wikiInfo, pageKey) => {
+        infoByPageKey.set(pageKey, wikiInfo);
+      });
+    }
+
+    const entriesById = new Map(entries.map((entry) => [entry.id, entry]));
+    return characters.map((character) => {
+      const entry = entriesById.get(character.id);
+      if (!entry) {
+        return { ...character, sortMeta: createUnknownSortMetadata() };
+      }
+
+      return {
+        ...character,
+        sortMeta: buildCharacterSortMetadata(
+          infoByPageKey.get(entry.pageKey) || {},
+          infoByPageKey.get(entry.basePageKey) || {},
+        ),
+      };
+    });
+  } catch (error) {
+    console.warn("Character sort metadata could not be loaded:", error);
+    return characters.map((character) => ({ ...character, sortMeta: createUnknownSortMetadata() }));
+  }
+}
+
+function buildCharacterSortMetadata(wikiInfo = {}, baseWikiInfo = {}) {
+  const school = normalizeSortText(wikiInfo.school) || normalizeSortText(baseWikiInfo.school);
+  const age = parseSortNumber(wikiInfo.age) ?? parseSortNumber(baseWikiInfo.age);
+  const height = parseSortNumber(wikiInfo.height) ?? parseSortNumber(baseWikiInfo.height);
+
+  return {
+    school: isUnknownSortText(school) ? "" : school,
+    schoolKey: isUnknownSortText(school) ? "" : normalizeSchoolSortKey(school),
+    age,
+    height,
+  };
+}
+
+function createUnknownSortMetadata() {
+  return {
+    school: "",
+    schoolKey: "",
+    age: null,
+    height: null,
+  };
 }
 
 function excludeCharacters(records) {
@@ -1657,6 +1756,9 @@ async function fetchBlueArchiveWikiJapaneseInfoBatch(pageNames) {
     const wikiInfo = {
       personalNameJp: getWikitextTemplateValue(wikitext, "PersonalNameJp"),
       variant: getWikitextTemplateValue(wikitext, "Variant"),
+      school: getWikitextTemplateValue(wikitext, "School"),
+      age: getWikitextTemplateValue(wikitext, "Age"),
+      height: getWikitextTemplateValue(wikitext, "Height"),
     };
     infoByPageKey.set(pageKey, wikiInfo);
 
@@ -2775,6 +2877,23 @@ function updateCharacterCount() {
   characterCount.textContent = `${state.characters.length}件`;
 }
 
+function handleSortModeChange() {
+  const mode = getSelectedSortMode();
+  sortAllTierItemIds(mode);
+  saveState();
+  render();
+  setStatus(`${SORT_MODE_LABELS.get(mode) || "名前順"}で並び替えました`);
+}
+
+function getSelectedSortMode() {
+  const mode = sortModeSelect.value;
+  return SORT_MODE_LABELS.has(mode) ? mode : "title";
+}
+
+function sortAllTierItemIds(mode) {
+  state.tiers.forEach((tier) => sortTierItemIds(tier, mode));
+}
+
 function sortCharactersByTitle(characters) {
   return [...characters].sort(compareCharactersByGroup);
 }
@@ -2784,15 +2903,76 @@ function sortUnclassifiedTier() {
 }
 
 function sortTierItemIdsByTitle(tier) {
+  sortTierItemIds(tier, "title");
+}
+
+function sortTierItemIds(tier, mode = "title") {
   const characterById = new Map(state.characters.map((character) => [character.id, character]));
   tier.itemIds.sort((left, right) => {
     const leftCharacter = characterById.get(left);
     const rightCharacter = characterById.get(right);
     if (leftCharacter && rightCharacter) {
-      return compareCharactersByGroup(leftCharacter, rightCharacter);
+      return compareCharactersBySortMode(leftCharacter, rightCharacter, mode);
     }
     return compareTitles(leftCharacter?.title || left, rightCharacter?.title || right);
   });
+}
+
+function compareCharactersBySortMode(left, right, mode = "title") {
+  let comparison = 0;
+  if (mode === "school") {
+    comparison = compareCharacterSchools(left, right);
+  } else if (mode === "age") {
+    comparison = compareNullableNumbers(left.sortMeta?.age, right.sortMeta?.age);
+  } else if (mode === "height") {
+    comparison = compareNullableNumbers(left.sortMeta?.height, right.sortMeta?.height);
+  }
+
+  return comparison || compareCharactersByGroup(left, right);
+}
+
+function compareCharacterSchools(left, right) {
+  const leftSchool = left.sortMeta?.schoolKey || "";
+  const rightSchool = right.sortMeta?.schoolKey || "";
+  const knownComparison = compareKnownValues(Boolean(leftSchool), Boolean(rightSchool));
+  if (knownComparison) {
+    return knownComparison;
+  }
+  if (!leftSchool && !rightSchool) {
+    return 0;
+  }
+
+  const leftRank = getSchoolSortRank(leftSchool);
+  const rightRank = getSchoolSortRank(rightSchool);
+  return leftRank - rightRank || compareTitles(left.sortMeta?.school || leftSchool, right.sortMeta?.school || rightSchool);
+}
+
+function getSchoolSortRank(schoolKey) {
+  const index = SCHOOL_SORT_ORDER.indexOf(schoolKey);
+  return index >= 0 ? index : SCHOOL_SORT_ORDER.length;
+}
+
+function compareNullableNumbers(left, right) {
+  const leftKnown = Number.isFinite(left);
+  const rightKnown = Number.isFinite(right);
+  const knownComparison = compareKnownValues(leftKnown, rightKnown);
+  if (knownComparison) {
+    return knownComparison;
+  }
+  if (!leftKnown && !rightKnown) {
+    return 0;
+  }
+  return left - right;
+}
+
+function compareKnownValues(leftKnown, rightKnown) {
+  if (leftKnown && !rightKnown) {
+    return -1;
+  }
+  if (!leftKnown && rightKnown) {
+    return 1;
+  }
+  return 0;
 }
 
 function compareCharactersByGroup(left, right) {
@@ -2816,6 +2996,36 @@ function cleanTitle(title) {
   return String(title || "")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function normalizeSortText(value) {
+  return cleanJapaneseWikiValue(value)
+    .replace(/\{\{[^}]*\}\}/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isUnknownSortText(value) {
+  return !value || /^(none|unknown|n\/a|na|null|-|--|\?|？|不明|未定)$/i.test(String(value).trim());
+}
+
+function normalizeSchoolSortKey(value) {
+  return normalizeTierMakerTitleKey(value);
+}
+
+function parseSortNumber(value) {
+  const normalized = normalizeSortText(value);
+  if (isUnknownSortText(normalized)) {
+    return null;
+  }
+
+  const match = /(\d+(?:\.\d+)?)/.exec(normalized);
+  if (!match) {
+    return null;
+  }
+
+  const number = Number.parseFloat(match[1]);
+  return Number.isFinite(number) ? number : null;
 }
 
 function createCharacterId(title) {
