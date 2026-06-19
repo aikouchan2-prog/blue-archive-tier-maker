@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ブルーアーカイブ ティア表メーカー</title>
-    <link rel="stylesheet" href="styles.css?v=20260619-1" />
+    <link rel="stylesheet" href="styles.css?v=20260619-2" />
   </head>
   <body>
     <header class="app-header">
@@ -28,12 +28,15 @@
 
           <label class="sort-box">
             <span>並び替え</span>
-            <select id="sortModeSelect">
-              <option value="title">名前順</option>
-              <option value="school">学園順</option>
-              <option value="age">年齢順</option>
-              <option value="height">身長順</option>
-            </select>
+            <span class="sort-controls">
+              <select id="sortModeSelect">
+                <option value="title">名前順</option>
+                <option value="school">学園順</option>
+                <option value="age">年齢順</option>
+                <option value="height">身長順</option>
+              </select>
+              <button id="sortDirectionButton" class="icon-button sort-direction-button" type="button" aria-label="降順に切り替え" title="降順に切り替え">⇅</button>
+            </span>
           </label>
         </div>
 
@@ -118,6 +121,6 @@
 
     <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.2/Sortable.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/html-to-image@1.11.11/dist/html-to-image.min.js"></script>
-    <script src="app.js?v=20260619-1"></script>
+    <script src="app.js?v=20260619-2"></script>
   </body>
 </html>

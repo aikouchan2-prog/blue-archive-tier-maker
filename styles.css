@@ -326,7 +326,14 @@ button.danger:hover {
 }
 
 .sort-box {
-  grid-template-columns: auto minmax(128px, 160px);
+  grid-template-columns: auto minmax(176px, 216px);
+}
+
+.sort-controls {
+  display: grid;
+  grid-template-columns: minmax(128px, 1fr) 40px;
+  gap: 8px;
+  align-items: center;
 }
 
 .search-box input,
@@ -338,6 +345,22 @@ button.danger:hover {
   padding: 0 12px;
   color: var(--ink);
   background: #ffffff;
+}
+
+.icon-button {
+  display: inline-grid;
+  place-items: center;
+  min-width: 40px;
+  width: 40px;
+  min-height: 40px;
+  padding: 0;
+  font-size: 1.15rem;
+  line-height: 1;
+}
+
+.sort-direction-button[aria-pressed="true"] {
+  border-color: #244b74;
+  background: #2f5f92;
 }
 
 .search-box input:focus,
@@ -608,6 +631,10 @@ button:focus-visible,
   .search-box,
   .sort-box {
     grid-template-columns: 1fr;
+  }
+
+  .sort-controls {
+    grid-template-columns: minmax(0, 1fr) 40px;
   }
 
   .tier-row {

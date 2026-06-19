@@ -455,6 +455,7 @@ const loadStatus = document.querySelector("#loadStatus");
 const characterCount = document.querySelector("#characterCount");
 const searchInput = document.querySelector("#searchInput");
 const sortModeSelect = document.querySelector("#sortModeSelect");
+const sortDirectionButton = document.querySelector("#sortDirectionButton");
 const addTierButton = document.querySelector("#addTierButton");
 const addCharacterButton = document.querySelector("#addCharacterButton");
 const refreshButton = document.querySelector("#refreshButton");
@@ -489,6 +490,7 @@ let state = createEmptyState();
 let sortables = [];
 let activeTierColorId = null;
 let selectedTargetTierId = null;
+let currentSortDirection = "asc";
 const japaneseWikiTargetCache = loadJapaneseWikiTargetCache();
 const wikiruPageExistenceCache = new Map();
 let japaneseWikiPreloadRunId = 0;
@@ -514,6 +516,7 @@ function bindControls() {
   renderColorPalette(newTierPalette, newTierColor.value);
   searchInput.addEventListener("input", applySearchFilter);
   sortModeSelect.addEventListener("change", handleSortModeChange);
+  sortDirectionButton.addEventListener("click", toggleSortDirection);
   addTierButton.addEventListener("click", openAddTierDialog);
   addCharacterButton.addEventListener("click", openAddCharacterDialog);
   addTierForm.addEventListener("submit", addTierFromForm);
@@ -1106,6 +1109,7 @@ function render() {
 
   setupSortables();
   updateCharacterCount();
+  updateSortDirectionButton();
   applySearchFilter();
 }
 
@@ -2878,11 +2882,20 @@ function updateCharacterCount() {
 }
 
 function handleSortModeChange() {
+  applyCurrentSort();
+}
+
+function toggleSortDirection() {
+  currentSortDirection = currentSortDirection === "asc" ? "desc" : "asc";
+  applyCurrentSort();
+}
+
+function applyCurrentSort() {
   const mode = getSelectedSortMode();
-  sortAllTierItemIds(mode);
+  sortAllTierItemIds(mode, currentSortDirection);
   saveState();
   render();
-  setStatus(`${SORT_MODE_LABELS.get(mode) || "名前順"}で並び替えました`);
+  setStatus(`${SORT_MODE_LABELS.get(mode) || "名前順"}（${getSortDirectionLabel()}）で並び替えました`);
 }
 
 function getSelectedSortMode() {
@@ -2890,8 +2903,20 @@ function getSelectedSortMode() {
   return SORT_MODE_LABELS.has(mode) ? mode : "title";
 }
 
-function sortAllTierItemIds(mode) {
-  state.tiers.forEach((tier) => sortTierItemIds(tier, mode));
+function getSortDirectionLabel() {
+  return currentSortDirection === "desc" ? "降順" : "昇順";
+}
+
+function updateSortDirectionButton() {
+  const isDescending = currentSortDirection === "desc";
+  const nextLabel = isDescending ? "昇順に切り替え" : "降順に切り替え";
+  sortDirectionButton.setAttribute("aria-pressed", String(isDescending));
+  sortDirectionButton.setAttribute("aria-label", nextLabel);
+  sortDirectionButton.title = nextLabel;
+}
+
+function sortAllTierItemIds(mode, direction = "asc") {
+  state.tiers.forEach((tier) => sortTierItemIds(tier, mode, direction));
 }
 
 function sortCharactersByTitle(characters) {
@@ -2906,32 +2931,32 @@ function sortTierItemIdsByTitle(tier) {
   sortTierItemIds(tier, "title");
 }
 
-function sortTierItemIds(tier, mode = "title") {
+function sortTierItemIds(tier, mode = "title", direction = "asc") {
   const characterById = new Map(state.characters.map((character) => [character.id, character]));
   tier.itemIds.sort((left, right) => {
     const leftCharacter = characterById.get(left);
     const rightCharacter = characterById.get(right);
     if (leftCharacter && rightCharacter) {
-      return compareCharactersBySortMode(leftCharacter, rightCharacter, mode);
+      return compareCharactersBySortMode(leftCharacter, rightCharacter, mode, direction);
     }
     return compareTitles(leftCharacter?.title || left, rightCharacter?.title || right);
   });
 }
 
-function compareCharactersBySortMode(left, right, mode = "title") {
+function compareCharactersBySortMode(left, right, mode = "title", direction = "asc") {
   let comparison = 0;
   if (mode === "school") {
-    comparison = compareCharacterSchools(left, right);
+    comparison = compareCharacterSchools(left, right, direction);
   } else if (mode === "age") {
-    comparison = compareNullableNumbers(left.sortMeta?.age, right.sortMeta?.age);
+    comparison = compareNullableNumbers(left.sortMeta?.age, right.sortMeta?.age, direction);
   } else if (mode === "height") {
-    comparison = compareNullableNumbers(left.sortMeta?.height, right.sortMeta?.height);
+    comparison = compareNullableNumbers(left.sortMeta?.height, right.sortMeta?.height, direction);
   }
 
-  return comparison || compareCharactersByGroup(left, right);
+  return comparison || applySortDirection(compareCharactersByGroup(left, right), direction);
 }
 
-function compareCharacterSchools(left, right) {
+function compareCharacterSchools(left, right, direction = "asc") {
   const leftSchool = left.sortMeta?.schoolKey || "";
   const rightSchool = right.sortMeta?.schoolKey || "";
   const knownComparison = compareKnownValues(Boolean(leftSchool), Boolean(rightSchool));
@@ -2944,7 +2969,10 @@ function compareCharacterSchools(left, right) {
 
   const leftRank = getSchoolSortRank(leftSchool);
   const rightRank = getSchoolSortRank(rightSchool);
-  return leftRank - rightRank || compareTitles(left.sortMeta?.school || leftSchool, right.sortMeta?.school || rightSchool);
+  return applySortDirection(
+    leftRank - rightRank || compareTitles(left.sortMeta?.school || leftSchool, right.sortMeta?.school || rightSchool),
+    direction,
+  );
 }
 
 function getSchoolSortRank(schoolKey) {
@@ -2952,7 +2980,7 @@ function getSchoolSortRank(schoolKey) {
   return index >= 0 ? index : SCHOOL_SORT_ORDER.length;
 }
 
-function compareNullableNumbers(left, right) {
+function compareNullableNumbers(left, right, direction = "asc") {
   const leftKnown = Number.isFinite(left);
   const rightKnown = Number.isFinite(right);
   const knownComparison = compareKnownValues(leftKnown, rightKnown);
@@ -2962,7 +2990,7 @@ function compareNullableNumbers(left, right) {
   if (!leftKnown && !rightKnown) {
     return 0;
   }
-  return left - right;
+  return applySortDirection(left - right, direction);
 }
 
 function compareKnownValues(leftKnown, rightKnown) {
@@ -2973,6 +3001,10 @@ function compareKnownValues(leftKnown, rightKnown) {
     return 1;
   }
   return 0;
+}
+
+function applySortDirection(comparison, direction = "asc") {
+  return direction === "desc" ? comparison * -1 : comparison;
 }
 
 function compareCharactersByGroup(left, right) {
